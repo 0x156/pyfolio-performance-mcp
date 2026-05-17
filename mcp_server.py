@@ -75,7 +75,7 @@ def _format_transaction(t: Transaction) -> dict:
 
 def _get_sec_info(sec: Security, shares: float) -> dict:
     price = _price_to_eur(sec.getMostRecentValue())
-    return {
+    info = {
         "name": sec.getName(),
         "isin": sec.isin,
         "wkn": sec.wkn,
@@ -83,6 +83,14 @@ def _get_sec_info(sec: Security, shares: float) -> dict:
         "current_price_eur": price,
         "total_value_eur": round(price * shares, 2)
     }
+    if sec.ticker_symbol:
+        info["ticker_symbol"] = sec.ticker_symbol
+    if sec.currency_code:
+        info["currency_code"] = sec.currency_code
+    attrs = sec.get_custom_attributes()
+    if attrs:
+        info["custom_attributes"] = attrs
+    return info
 
 
 def _get_security(name: str) -> Security:
@@ -171,7 +179,8 @@ def get_portfolio_summary() -> dict:
         accounts: list of {name, balance_eur}
         depots: list of {name, value_eur, invested_eur, profit_eur,
                 securities_count, securities: {name: {isin, wkn, shares,
-                current_price_eur, total_value_eur}}}
+                current_price_eur, total_value_eur, ticker_symbol?,
+                currency_code?, custom_attributes?}}}
     """
     portfolio = _require_portfolio()
 
@@ -256,7 +265,9 @@ def get_depots() -> dict:
     Each depot includes its securities with current price, shares, and total value.
 
     Returns:
-        depots: list of {name, securities: {security_name: {name, isin, wkn, shares, current_price_eur, total_value_eur}}, transaction_count}
+        depots: list of {name, securities: {security_name: {name, isin, wkn,
+                shares, current_price_eur, total_value_eur, ticker_symbol?,
+                currency_code?, custom_attributes?}}, transaction_count}
     """
     portfolio = _require_portfolio()
     depots = []
@@ -273,14 +284,16 @@ def get_securities() -> dict:
     """List all securities tracked in the portfolio.
 
     Includes securities the user has fully sold (shares == 0) and
-    watchlist entries that were never bought. For currently held
-    positions only, use get_securities_with_values().
+    watchlist entries that were never bought.
 
     Each entry includes identifying info (ISIN, WKN), current market price,
-    total shares held, and total value.
+    total shares held, and total value. When available in the XML, entries
+    also contain ticker_symbol, currency_code, and custom_attributes.
 
     Returns:
-        securities: list of {name, isin, wkn, shares, current_price_eur, total_value_eur}
+        securities: list of {name, isin, wkn, shares, current_price_eur,
+                    total_value_eur, ticker_symbol?, currency_code?,
+                    custom_attributes?}
     """
     portfolio = _require_portfolio()
     securities = [_get_sec_info(sec, portfolio.getShares(sec))
@@ -331,13 +344,14 @@ def get_depot_by_name(name: str) -> dict:
         name: depot name to search for
 
     Returns:
-        depot: {name, securities: {security_name: {name, shares, current_price_eur}}}
+        depot: {name, securities: {security_name: {name, isin, wkn, shares,
+                current_price_eur, total_value_eur, ticker_symbol?,
+                currency_code?, custom_attributes?}}}
     """
     portfolio = _require_portfolio()
     for depot in portfolio.getDepots():
         if depot.getName().lower() == name.lower():
-            securities = {sec.getName(): {"shares": round(shares, 4),
-                                          "current_price_eur": _price_to_eur(sec.getMostRecentValue())}
+            securities = {sec.getName(): _get_sec_info(sec, shares)
                          for sec, shares in depot.getSecurities().items()}
             return {"depot": {"name": depot.getName(), "securities": securities}}
     raise ValueError(f"Depot not found: {name}")
@@ -351,7 +365,8 @@ def get_security_by_name(name: str) -> dict:
         name: security name (e.g. "Apple Inc.", "iShares Core MSCI World UCITS ETF")
 
     Returns:
-        security: {name, isin, wkn, shares, current_price_eur, total_value_eur}
+        security: {name, isin, wkn, shares, current_price_eur, total_value_eur,
+                   ticker_symbol?, currency_code?, custom_attributes?}
     """
     _require_portfolio()
     sec = _get_security(name)
@@ -366,7 +381,8 @@ def get_security_by_isin(isin: str) -> dict:
         isin: 12-character ISIN code (e.g. "US0378331005" for Apple)
 
     Returns:
-        security: {name, isin, wkn, shares, current_price_eur, total_value_eur}
+        security: {name, isin, wkn, shares, current_price_eur, total_value_eur,
+                   ticker_symbol?, currency_code?, custom_attributes?}
     """
     _require_portfolio()
     sec = Security.getSecurityByIsin(isin)
@@ -383,7 +399,8 @@ def get_security_by_wkn(wkn: str) -> dict:
         wkn: 6-character WKN code (e.g. "865985" for Apple)
 
     Returns:
-        security: {name, isin, wkn, shares, current_price_eur, total_value_eur}
+        security: {name, isin, wkn, shares, current_price_eur, total_value_eur,
+                   ticker_symbol?, currency_code?, custom_attributes?}
     """
     _require_portfolio()
     sec = Security.getSecurityByWkn(wkn)
@@ -522,36 +539,6 @@ def get_transactions_for_security(security_name: str, depot: str | None = None, 
     if type:
         result["type"] = type.upper()
     return result
-
-
-@mcp.tool
-def get_securities_with_values() -> dict:
-    """List all currently held securities (shares > 0) with current market values.
-
-    Results are sorted by total_value_eur descending (largest holdings first).
-
-    Returns:
-        securities: list of {name, shares, current_price_eur, total_value_eur}
-        total_value_eur: summed value of all holdings
-        count: number of securities with positive share count
-    """
-    portfolio = _require_portfolio()
-    securities = []
-    total_value = 0
-
-    for sec in portfolio.getSecurities():
-        shares = portfolio.getShares(sec)
-        if shares <= 0:
-            continue
-        price = _price_to_eur(sec.getMostRecentValue())
-        value = price * shares
-        total_value += value
-        securities.append({"name": sec.getName(), "shares": round(shares, 4),
-                           "current_price_eur": price, "total_value_eur": round(value, 2)})
-
-    securities.sort(key=lambda x: x["total_value_eur"], reverse=True)
-    return {"securities": securities, "total_value_eur": round(total_value, 2),
-            "count": len(securities)}
 
 
 @mcp.tool
